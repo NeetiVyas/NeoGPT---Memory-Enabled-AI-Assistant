@@ -41,7 +41,7 @@ password=os.getenv("NEO4J_PASSWORD")
 with GraphDatabase.driver(uri, auth=(username, password)) as driver:
     driver.verify_connectivity()
 
-embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-001", transport="rest" )
+embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", transport="rest" )
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size = 500,
