@@ -9,18 +9,18 @@ import io
 import os
 import requests
 import base64
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from dotenv import load_dotenv
 from langchain_together import ChatTogether
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from duckduckgo_search import DDGS
 from langchain.tools import Tool
+from langchain_core.tools import tool
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain import hub
-from mem0 import MemoryClient, Memory
+from mem0 import Memory
 from neo4j import GraphDatabase
 from qdrant_client import QdrantClient
-from qdrant_client.http import models
 
 load_dotenv()
 
@@ -86,8 +86,11 @@ st.set_page_config(
     page_icon="🍽️",
 )
 
+@tool
 def ddg_search(query: str, max_results: int = 4) -> str:
     """
+    Use this tool when you need to search something from Web.
+    Input: a natural language query. Output: summarized top results.
     Fetch and format Duckduckgo search results.
     """
 
@@ -110,14 +113,17 @@ def ddg_search(query: str, max_results: int = 4) -> str:
             out_lines.append(f"{i}. {title}\n{snippet}\n{href}")
             return '\n\n'.join(out_lines)
         
-ddg_tool = Tool.from_function(
-    func=lambda q: ddg_search(q, max_results=4),
-    name="duckduckgo_search",
-    description=(
-        "Use this tool when you need to search something from Web."
-        "Input: a natural language query. Output: summarized top results."
-    )
-)
+@tool
+def get_weather_data(city: str) -> str:
+    """
+    This function fetches the current weather data for a given city
+    """
+    url = f'https://api.weatherstack.com/current?access_key=4d1d8ae207a8c845a52df8a67bf3623e&query={city}'
+
+    response = requests.get(url)
+
+    return response.json()
+
 
 # CSS
 st.markdown("""
@@ -358,20 +364,13 @@ st.markdown(f"""<div class='header'>NeoGPT <img src='https://media.giphy.com/med
 
 if "llm" not in st.session_state:
     st.session_state.llm = ChatTogether(model="meta-llama/Llama-3-70b-chat-hf")
+
+available_tools = [ddg_search, get_weather_data]
     
-if "agent" not in st.session_state:
-    react_prompt = hub.pull("hwchase17/react")
-    agent = create_react_agent(
-        llm=st.session_state.llm,
-        tools=[ddg_tool],
-        prompt = react_prompt
-    )
-    st.session_state.agent = agent
+if "llm_with_tools" not in st.session_state:
+    st.session_state.llm_with_tools = st.session_state.llm.bind_tools(available_tools)
 
-agent = st.session_state.agent
-
-if "agent_executor" not in st.session_state:
-    st.session_state.agent_executor = AgentExecutor(agent=agent, tools=[ddg_tool], verbose=True, handle_parsing_errors=True)
+llm_with_tools = st.session_state.llm_with_tools
 
 import asyncio
 import threading
@@ -503,17 +502,60 @@ if last_query and st.session_state.messages[-1]['role'] == 'user':
         with st.spinner("generating response...."):
             try:
                 agent_response = None
-                memory_prompt=f"""
-                You are a memory aware fact extraction agent,
-                designed to analyze inputs, extract structured knowledge,
-                and maintain optimized memory.
+                memory_prompt=memory_prompt = f"""
+                You are a memory-aware assistant with the ability to extract facts, reason with user context, 
+                and decide when to use external tools.
 
-                You have access to the following user memories (may or may not be useful):
-                {memory_context}
+                ### Your Capabilities:
+                1. **Memory Awareness**  
+                - You have access to the following user memories (may or may not be useful):  
+                    {memory_context}  
+                - Always consider these memories when responding to ensure personalized, consistent answers.  
+                - If new important facts are shared, try to extract and summarize them in a structured way.  
 
-                Use these memories to provide personalized responses and remember important details about the user.
-                Always consider user memories when responding.
+                2. **Knowledge Handling**  
+                - If the user query can be answered directly using your reasoning or stored memories, do so.  
+                - If the query requires information that you cannot deduce from memory or general knowledge, 
+                    use the available tools.  
+
+                3. **Tool Usage**  
+                You have access to these tools:  
+                {available_tools}  
+
+                - **DDG (DuckDuckGo)** → Use this when you need to search for factual, up-to-date, or external information.  
+                - **get_weather_tool** → Use this when the user asks about current, forecast, or location-based weather.  
+
+                ### Tool Usage Guidelines:
+                - Do NOT use tools unnecessarily if you already know the answer.  
+                - Always choose the most relevant tool based on the query.  
+                - If the query is partially answerable with memory but requires fresh data, combine both.  
+
+                4. **Response Formatting**  
+                - If you use a tool, clearly integrate the tool’s result into your natural response.  
+                - Never expose raw tool calls to the user, only the final useful information.  
+                - Be concise, helpful, and user-focused.  
+
+                ### Example Behavior:
+
+                **Example 1:**  
+                User: "Find the weather of the city Coimbatore"  
+                Action: Call `get_weather_tool("Coimbatore")`  
+                Response: "The current weather in Coimbatore is 28°C with light rain."
+
+                **Example 2:**  
+                User: "Who is the CEO of Tesla?"  
+                Action: Call `DDG("CEO of Tesla")`  
+                Response: "The current CEO of Tesla is Elon Musk."
+
+                **Example 3:**  
+                User: "You remember I told you I am learning Django, right?"  
+                Action: Recall from memory → respond without tool.  
+                Response: "Yes! You mentioned you are learning Django recently. Do you want me to share a roadmap or help with a specific issue?"
+                ---
+
+                Your goal is to seamlessly combine **memory, reasoning, and tool use** to provide accurate, helpful, and personalized responses.
                 """
+
                 if st.session_state.faiss_store:
                     retriever = st.session_state.faiss_store.as_retriever(search_kwargs={'k': 4})
                     retrieved_docs = retriever.get_relevant_documents(last_query)
@@ -526,9 +568,9 @@ if last_query and st.session_state.messages[-1]['role'] == 'user':
                         ]
                         agent_response = st.session_state.llm.invoke(rag_prompt).content
                     else:
-                        agent_response=st.session_state.llm.invoke([SystemMessage(content=memory_prompt)] + [SystemMessage(content="You are a helpful assistant that uses long-term memory when appropriate.")] + [HumanMessage(content=human_content)] + history).content
+                        agent_response=llm_with_tools.invoke([SystemMessage(content=memory_prompt)] + [SystemMessage(content="You are a helpful assistant that uses long-term memory when appropriate.")] + [HumanMessage(content=human_content)] + history).content
                 else:
-                    agent_response = st.session_state.llm.invoke(history + [HumanMessage(content=human_content)] + [SystemMessage(content=memory_prompt)]).content
+                    agent_response=llm_with_tools.invoke([SystemMessage(content=memory_prompt)] + [SystemMessage(content="You are a helpful assistant that uses long-term memory when appropriate.")] + [HumanMessage(content=human_content)] + history).content
             except Exception as e:
                 agent_response = f"Error generating response: {e}"
 
