@@ -48,30 +48,6 @@ text_splitter = RecursiveCharacterTextSplitter(
     chunk_overlap = 200
 )
 
-def save_to_qdrant(user_msg, assistant_msg, user_id, parent_id=None):
-    texts=[("user", user_msg), ("assistant", assistant_msg)]
-    points=[]
-    for role, msg in texts:
-        chunks=text_splitter.split_text(msg)
-        vectors=embedding_model.embed_documents(chunks)
-
-        for idx, chunk in enumerate(chunks):
-            points.append(
-                models.PointStruct(
-                    id=None,
-                    vector=vectors[idx],
-                    payload={
-                        "user_id": user_id,
-                        "role": role,
-                        "text": chunk,
-                        "parent_id": parent_id,
-                        "chunk_index": idx
-                    }
-                )
-            )
-    
-    client.upsert(collection_name='mem0_default', points=points)
-
 config = {
     "vector_store": {
         "provider": "qdrant",
